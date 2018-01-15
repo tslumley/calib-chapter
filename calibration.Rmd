@@ -56,6 +56,7 @@ ccmle <- glm(relaps~offset(log(weight))+histol*(age1+age2)+ I(stage>2)*tumdiam, 
 summary(ccmle)
 survey_cc <- svydesign(id=~1, weights=~weight, strata=~relaps, data=ccsample)
 ccest <- svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=survey_cc)
+summary(ccest)
 ```
 
 The two seem fairly comparable: we know that asymptotically the maximum likelihood estimator must be better, but the difference is small enough to not show up in a single comparison
@@ -96,7 +97,7 @@ Calibrate, and fit the model of interest (ie, with `histol`) to the calibrated s
 ```{r}                            
 calformula <- make.formula(colnames(inffun))
 cal_twophase <- calibrate(aug_twophase, calformula, phase=2)
-svyest_instit<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, design=cal_twophase)
+svyest_instit<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase)
 summary(svyest_instit)
 ```
 
@@ -113,8 +114,9 @@ round(cbind(coef(twophaseest), coef(svyest_instit))-coef(fullmodel),3)
 It is always valid to just use a surrogate such as `instit` in calibration, but it is probably not optimal. The attenuation bias in using a mismeasured predictor translates into a loss of precision in the calibrated estimate.  We can try to construct a regression imputation of histology instead:
 
 ```{r}
-impmodel<-svyglm(histol~instit*I(stage>3)+I(age>10)+factor(study),family=quasibinomial,design=nwts_twophase)
-nwts$imphistol <-predict(impmodel,newdata=nwts,type="response")
+impmodel<-svyglm(histol~instit*(relaps+I(stage>3))+I(age>10)+factor(study),family=quasibinomial,design=nwts_twophase)
+nwts$imphistol <-as.vector(predict(impmodel,newdata=nwts,type="response",se.fit=FALSE))
+with(nwts, by(imphistol, histol, summary))
 ```
 
 We now proceed as before. In particular, note that it is important to use `imphistol` for all observations in the phase-1 model, even those where `histol` is available -- it was not available at phase 1. 
@@ -135,7 +137,7 @@ Calibrate, and fit the model of interest
 ```{r}                            
 calformula <- make.formula(colnames(inffun_imp))
 cal_twophase_imp <- calibrate(aug_twophase_imp, calformula, phase=2)
-svyest_imp<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, design=cal_twophase_imp)
+svyest_imp<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase_imp)
 summary(svyest_imp)
 ```
 
@@ -154,7 +156,7 @@ We can take multiple predictions from the fitted imputation model, produce influ
 inffun_mi<-matrix(0,nrow=nrow(nwts),ncol=ncol(inffun_imp))
 M<-50
 for(i in 1:M){
-  nwts$mihistol <-rbinom(nrow(nwts),1, predict(impmodel,newdata=nwts,type="response"))
+  nwts$mihistol <-rbinom(nrow(nwts),1, as.vector(predict(impmodel,newdata=nwts,type="response",se.fit=FALSE)))
   phase1model_imp <- glm(relaps~mihistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
   inffun_mi<-inffun_mi+(model.matrix(phase1model_imp)*resid(phase1model_imp, type="response"))%*%vcov(phase1model)
 }
@@ -180,7 +182,7 @@ round(cbind(coef(twophaseest), coef(svyest_instit),coef(svyest_imp),coef(svyest_
 
 ## Simulation
 
-Finally, what we really want for comparison purposes is a summary over repeated case-control samples. We run the entire procedure above 100 times.
+Finally, what we really want for comparison purposes is a summary over repeated case-control samples. We run the entire procedure above 500 times.
 
 ```{r ref.label, echo=FALSE}
 rval<-replicate(500,{
@@ -202,6 +204,9 @@ calformula <- make.formula(colnames(inffun))
 cal_twophase <- calibrate(aug_twophase, calformula, phase=2)
 svyest_instit<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase)
 
+impmodel<-svyglm(histol~instit*(relaps+I(stage>3))+I(age>10)+factor(study),family=quasibinomial,design=nwts_twophase)
+nwts$imphistol <-as.vector(predict(impmodel,newdata=nwts,type="response",se.fit=FALSE))
+
 phase1model_imp <- glm(relaps~imphistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
 inffun_imp<-model.matrix(phase1model_imp)*resid(phase1model_imp, type="response")
 colnames(inffun_imp)<-paste0("if",1:ncol(inffun_imp))
@@ -213,7 +218,7 @@ svyest_imp<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibi
 inffun_mi<-matrix(0,nrow=nrow(nwts),ncol=ncol(inffun_imp))
 M<-20
 for(i in 1:M){
-  nwts$mihistol <-rbinom(nrow(nwts),1, predict(impmodel,newdata=nwts,type="response"))
+  nwts$mihistol <-rbinom(nrow(nwts),1, as.vector(predict(impmodel,newdata=nwts,type="response",se.fit=FALSE)))
   phase1model_imp <- glm(relaps~mihistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
   inffun_mi<-inffun_mi+(model.matrix(phase1model_imp)*resid(phase1model_imp, type="response"))%*%vcov(phase1model)
 }
