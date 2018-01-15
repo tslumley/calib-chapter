@@ -1,0 +1,250 @@
+---
+title: "Calibration in case-control sampling"
+author: "Thomas Lumley"
+date: "1/15/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## National Wilms' Tumour Group data
+
+```{r}
+set.seed(2017-12-3)
+nwts <- read.table("nwts-share.txt", header=TRUE)
+summary(nwts)
+```
+
+## New variables
+
+A linear spline in age
+```{r}
+nwts$age1 <- with(nwts, pmin(age, 1))
+nwts$age2 <- with(nwts, pmax(age, 1))
+```
+
+
+## The full-cohort model
+
+Histology:age interaction and stage:tumour-diameter interaction
+
+```{r}
+fullmodel <- glm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+summary(fullmodel)
+```
+
+## Case-control sample
+
+Here we take all the cases and a random sample of controls
+
+```{r}
+nwts$id <- 1:nrow(nwts)
+cases <- subset(nwts, relaps==1)
+noncases <- subset(nwts, relaps==0)
+controlsample <- sample(noncases$id, nrow(cases))
+ccsample<- rbind(cases, noncases[noncases$id %in% controlsample,])
+ccsample$weight<-with(ccsample, ifelse(relaps==1, 1, nrow(noncases)/nrow(cases)))
+```
+
+We can compare the maximum likelihood estimator and the survey estimator:
+
+```{r}
+library(survey)
+ccmle <- glm(relaps~offset(log(weight))+histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=ccsample)
+summary(ccmle)
+survey_cc <- svydesign(id=~1, weights=~weight, strata=~relaps, data=ccsample)
+ccest <- svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=survey_cc)
+```
+
+The two seem fairly comparable: we know that asymptotically the maximum likelihood estimator must be better, but the difference is small enough to not show up in a single comparison
+
+```{r}
+round(cbind(coef(ccmle), coef(ccest))-coef(fullmodel),3)
+```
+
+The simple survey estimator does not use the full cohort; we can declare a `twophase` object that does. We do not need to specify weights because the software can work out what they are.
+
+```{r}
+nwts_twophase <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=nwts)
+twophaseest <- svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=nwts_twophase)
+summary(twophaseest)
+```
+
+We still aren't using the whole cohort for anything, so the two analyses are almost identical
+
+## Using the whole cohort
+
+We'll try to use the whole cohort now. First, just use `instit` instead of `histol`
+
+First, fit the model to the full data
+
+```{r }
+phase1model <- glm(relaps~instit*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+```
+
+Extract the influence functions and create a new design object
+```{r }
+inffun<-model.matrix(phase1model)*resid(phase1model, type="response")
+colnames(inffun)<-paste0("if",1:ncol(inffun))
+aug_twophase <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun), method="simple")
+```
+   
+Calibrate, and fit the model of interest (ie, with `histol`) to the calibrated sample 
+   
+```{r}                            
+calformula <- make.formula(colnames(inffun))
+cal_twophase <- calibrate(aug_twophase, calformula, phase=2)
+svyest_instit<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, design=cal_twophase)
+summary(svyest_instit)
+```
+
+
+Comparing the uncalibrated and calibrated estimates, the coefficients have nearly all moved closer to the true full cohort value. 
+
+
+```{r}
+round(cbind(coef(twophaseest), coef(svyest_instit))-coef(fullmodel),3)
+```
+
+## Calibration by imputation
+
+It is always valid to just use a surrogate such as `instit` in calibration, but it is probably not optimal. The attenuation bias in using a mismeasured predictor translates into a loss of precision in the calibrated estimate.  We can try to construct a regression imputation of histology instead:
+
+```{r}
+impmodel<-svyglm(histol~instit*I(stage>3)+I(age>10)+factor(study),family=quasibinomial,design=nwts_twophase)
+nwts$imphistol <-predict(impmodel,newdata=nwts,type="response")
+```
+
+We now proceed as before. In particular, note that it is important to use `imphistol` for all observations in the phase-1 model, even those where `histol` is available -- it was not available at phase 1. 
+
+```{r}
+phase1model_imp <- glm(relaps~imphistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+```
+
+Extract the influence functions and create a new design object
+```{r}
+inffun_imp<-model.matrix(phase1model_imp)*resid(phase1model_imp, type="response")
+colnames(inffun_imp)<-paste0("if",1:ncol(inffun_imp))
+aug_twophase_imp <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun_imp), method="simple")
+```
+   
+Calibrate, and fit the model of interest   
+   
+```{r}                            
+calformula <- make.formula(colnames(inffun_imp))
+cal_twophase_imp <- calibrate(aug_twophase_imp, calformula, phase=2)
+svyest_imp<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, design=cal_twophase_imp)
+summary(svyest_imp)
+```
+
+
+There has been a slight additional improvement; slight, because `instit` is overwhelming the best predictor of histology. 
+
+```{r}
+round(cbind(coef(twophaseest), coef(svyest_instit), coef(svyest_imp))-coef(fullmodel),3)
+```
+
+## Multiple imputation
+
+We can take multiple predictions from the fitted imputation model, produce influence functions for each of them, then average the influence functions over the multiple imputations.  We need to use the full influence function, not just the score function as before, because the matrix it's multiplied by can vary between imputations.
+
+```{r mione}
+inffun_mi<-matrix(0,nrow=nrow(nwts),ncol=ncol(inffun_imp))
+M<-50
+for(i in 1:M){
+  nwts$mihistol <-rbinom(nrow(nwts),1, predict(impmodel,newdata=nwts,type="response"))
+  phase1model_imp <- glm(relaps~mihistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+  inffun_mi<-inffun_mi+(model.matrix(phase1model_imp)*resid(phase1model_imp, type="response"))%*%vcov(phase1model)
+}
+inffun_mi<-inffun_mi/M
+colnames(inffun_mi)<-paste0("if",1:ncol(inffun_mi))
+```
+
+Now, do the calibration and fit the model of interest
+
+```{r mitwo}
+aug_twophase_mi <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun_mi), method="simple")
+calformula <- make.formula(colnames(inffun_mi))
+cal_twophase_mi <- calibrate(aug_twophase_mi, calformula, phase=2)
+svyest_mi<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase_mi)
+summary(svyest_mi)
+```
+
+
+```{r}
+round(cbind(coef(twophaseest), coef(svyest_instit),coef(svyest_imp),coef(svyest_mi))-coef(fullmodel),3)
+```
+
+
+## Simulation
+
+Finally, what we really want for comparison purposes is a summary over repeated case-control samples. We run the entire procedure above 100 times.
+
+```{r ref.label, echo=FALSE}
+rval<-replicate(500,{
+  tryCatch({
+controlsample <- sample(noncases$id, nrow(cases))
+ccsample<- rbind(cases, noncases[noncases$id %in% controlsample,])
+ccsample$weight<-with(ccsample, ifelse(relaps==1, 1, nrow(noncases)/nrow(cases)))
+ccmle <- glm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=ccsample)
+survey_cc <- svydesign(id=~1, weights=~weight, strata=~relaps, data=ccsample)
+ccest <- svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=survey_cc)
+
+phase1model <- glm(relaps~instit*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+
+inffun<-model.matrix(phase1model)*resid(phase1model, type="response")
+colnames(inffun)<-paste0("if",1:ncol(inffun))
+aug_twophase <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun), method="simple")
+
+calformula <- make.formula(colnames(inffun))
+cal_twophase <- calibrate(aug_twophase, calformula, phase=2)
+svyest_instit<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase)
+
+phase1model_imp <- glm(relaps~imphistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+inffun_imp<-model.matrix(phase1model_imp)*resid(phase1model_imp, type="response")
+colnames(inffun_imp)<-paste0("if",1:ncol(inffun_imp))
+aug_twophase_imp <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun_imp), method="simple")
+calformula <- make.formula(colnames(inffun_imp))
+cal_twophase_imp <- calibrate(aug_twophase_imp, calformula, phase=2)
+svyest_imp<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase_imp)
+
+inffun_mi<-matrix(0,nrow=nrow(nwts),ncol=ncol(inffun_imp))
+M<-20
+for(i in 1:M){
+  nwts$mihistol <-rbinom(nrow(nwts),1, predict(impmodel,newdata=nwts,type="response"))
+  phase1model_imp <- glm(relaps~mihistol*(age1+age2)+ I(stage>2)*tumdiam, family=binomial, data=nwts)
+  inffun_mi<-inffun_mi+(model.matrix(phase1model_imp)*resid(phase1model_imp, type="response"))%*%vcov(phase1model)
+}
+inffun_mi<-inffun_mi/M
+colnames(inffun_mi)<-paste0("if",1:ncol(inffun_mi))
+aug_twophase_mi <- twophase(id=list(~1,~1), strata=list(NULL, ~relaps), subset=~I((relaps==1)| id %in% controlsample), data=cbind(nwts,inffun_mi), method="simple")
+calformula <- make.formula(colnames(inffun_mi))
+cal_twophase_mi <- calibrate(aug_twophase_mi, calformula, phase=2)
+svyest_mi<-svyglm(relaps~histol*(age1+age2)+ I(stage>2)*tumdiam, family=quasibinomial, design=cal_twophase_mi)
+
+(cbind(coef(ccmle), coef(ccest), coef(svyest_instit),coef(svyest_imp),coef(svyest_mi))-coef(fullmodel))
+  },
+error=function(e) matrix(NA,9,5)
+)
+})
+
+medianbias<-apply(rval,1:2,median,na.rm=TRUE)
+mad <- apply(rval,1:2,mad,na.rm=TRUE)
+colnames(medianbias)<-c("MLE", "Weighted","instit","imp","MI")
+colnames(mad)<-c("MLE", "Weighted","instit","imp","MI")
+save(mad,medianbias,rval,file="sim-calib.rda")
+```
+
+The median difference from the full-cohort regression is
+
+```{r}
+round(medianbias,3)
+```
+
+And the median absolute deviation (an outlier-resistant standard deviation) is
+
+```{r}
+round(mad,3)
+```

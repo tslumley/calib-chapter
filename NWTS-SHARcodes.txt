@@ -1,0 +1,43 @@
+Codesheet for NWTS expanded datafiles: nwts.ex and nwtsb.ex
+
+Var         Description               Codes
+-----------------------------------------------------------------------
+
+trel        Time to relapse or        Continuous
+            last date seen (yr)
+
+tsur        Time to death or          Continuous
+            last date seen (yr)
+
+relaps      Indicator of relapse      0 = Alive no prior relapse when last seen
+                                      1 = Relapsed after trel years
+
+dead        Indicator of death        0 = Alive when last seen
+                                      1 = Died after tsur years
+
+study       NWTS study                3 = NWTS-3
+                                      4 = NWTS-4
+
+stage       Stage of disease          1=I
+                                      2=II 
+                                      3=III 
+                                      4=IV
+
+histol      Central Path histology    0 = Favorable (FH)
+                                      1 = Unfavorable (UH)
+
+instit      Institutional histology   0 = Favorable (FH)
+                                      1 = Unfavorable (UH)
+
+age         Age at diagnosis (yr)     Continuous
+
+yr          Year of diagnosis         Calendar year
+
+specwgt     Weight of tumor           In grams (continuous)
+            bearing specimen
+
+tumdiam     Diameter of tumor	      In centimeters (continuous
+
+------------------------------------------------------------------------
+
+Reference: Kulich and Lin, J Amer Statist Assoc 99:832-44, 2004 and refs therein
